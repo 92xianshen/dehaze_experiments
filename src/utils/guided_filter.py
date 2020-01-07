@@ -4,6 +4,7 @@
 
 Reference:
     http://research.microsoft.com/en-us/um/people/kahe/eccv10/
+    https://github.com/wuhuikai/DeepGuidedFilter
 """
 
 import cv2
