@@ -39,37 +39,59 @@ def box_filter(x, r):
 
     return diff_y(tf.cumsum(diff_x(tf.cumsum(x, axis=1), r), axis=2), r)
 
-def guided_filter(x, y, r, eps=1e-8):
-    assert x.shape.ndims == 4 and y.shape.ndims == 4
+def guided_filter(I, p, r, eps=1e-8):
+    """ Guided Filter
 
-    x_shape = tf.shape(x)
-    y_shape = tf.shape(y)
+    Args:
+        I: guidance image
+        p: filtering image
+        r: the radius of the guidance
+        eps: epsilon for the guided filter
+    
+    Returns:
+        Filtering output q
+    """
+    assert I.shape.ndims == 4 and p.shape.ndims == 4
+
+    I_shape = tf.shape(I)
+    p_shape = tf.shape(p)
 
     # N
-    N = box_filter(tf.ones((1, x_shape[1], x_shape[2], 1), dtype=x.dtype), r)
+    N = box_filter(tf.ones((1, I_shape[1], I_shape[2], 1), dtype=I.dtype), r)
 
     # mean_x
-    mean_x = box_filter(x, r) / N
+    mean_I = box_filter(I, r) / N
     # mean_y
-    mean_y = box_filter(y, r) / N
+    mean_p = box_filter(p, r) / N
     # cov_xy
-    cov_xy = box_filter(x * y, r) / N - mean_x * mean_y
+    cov_Ip = box_filter(I * p, r) / N - mean_I * mean_p
     # var_x
-    var_x = box_filter(x * x, r) / N - mean_x * mean_x
+    var_I = box_filter(I * I, r) / N - mean_I * mean_I
 
     # A
-    A = cov_xy / (var_x + eps)
+    A = cov_Ip / (var_I + eps)
     # b
-    b = mean_y - A * mean_x
+    b = mean_p - A * mean_I
 
     mean_A = box_filter(A, r) / N
     mean_b = box_filter(b, r) / N
 
-    outputs = mean_A * x + mean_b
+    q = mean_A * I + mean_b
 
-    return outputs
+    return q
 
 def fast_guided_filter(lr_x, lr_y, hr_x, r, eps=1e-8):
+    """ Fast Guided Filter
+
+    Args:
+        I: guidance image
+        p: filtering image
+        r: the radius of the guidance
+        eps: epsilon for the guided filter
+    
+    Returns:
+        Filtering output q
+    """
     assert lr_x.shape.ndims == 4 and lr_y.shape.ndims == 4 and hr_x.shape.ndims == 4
 
     lr_x_shape = tf.shape(lr_x)
