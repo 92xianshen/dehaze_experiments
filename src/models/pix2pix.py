@@ -101,6 +101,75 @@ def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
 
     return result
 
+def guided_filter(I, p, r, eps=1e-8):
+    """ Guided Filter
+
+    Args:
+        I: guidance image
+        p: filtering image
+        r: the radius of the guidance
+        eps: epsilon for the guided filter
+    
+    Returns:
+        Filtering output q
+    """
+
+    def diff_x(inputs, r):
+        assert inputs.shape.ndims == 4
+
+        left    = inputs[:,         r:2 * r + 1]
+        middle  = inputs[:, 2 * r + 1:         ] - inputs[:,           :-2 * r - 1]
+        right   = inputs[:,        -1:         ] - inputs[:, -2 * r - 1:    -r - 1]
+
+        outputs = tf.concat([left, middle, right], axis=1)
+
+        return outputs
+
+    def diff_y(inputs, r):
+        assert inputs.shape.ndims == 4
+
+        left    = inputs[:, :,         r:2 * r + 1]
+        middle  = inputs[:, :, 2 * r + 1:         ] - inputs[:, :,           :-2 * r - 1]
+        right   = inputs[:, :,        -1:         ] - inputs[:, :, -2 * r - 1:    -r - 1]
+
+        outputs = tf.concat([left, middle, right], axis=2)
+
+        return outputs
+
+    def box_filter(x, r):
+        assert x.shape.ndims == 4
+
+        return diff_y(tf.cumsum(diff_x(tf.cumsum(x, axis=1), r), axis=2), r)
+
+        assert I.shape.ndims == 4 and p.shape.ndims == 4
+
+    I_shape = tf.shape(I)
+    p_shape = tf.shape(p)
+
+    # N
+    N = box_filter(tf.ones((1, I_shape[1], I_shape[2], 1), dtype=I.dtype), r)
+
+    # mean_x
+    mean_I = box_filter(I, r) / N
+    # mean_y
+    mean_p = box_filter(p, r) / N
+    # cov_xy
+    cov_Ip = box_filter(I * p, r) / N - mean_I * mean_p
+    # var_x
+    var_I = box_filter(I * I, r) / N - mean_I * mean_I
+
+    # A
+    A = cov_Ip / (var_I + eps)
+    # b
+    b = mean_p - A * mean_I
+
+    mean_A = box_filter(A, r) / N
+    mean_b = box_filter(b, r) / N
+
+    q = mean_A * I + mean_b
+
+    return q
+
 # def unet_generator(input_channels, output_channels, norm_type='batchnorm'):
 #     """ Modified u-net generator model (https://arxiv.org/abs/1611.07004).
 
@@ -166,8 +235,8 @@ def upsample(filters, size, norm_type='batchnorm', apply_dropout=False):
 
 #     return tf.keras.Model(inputs=inputs, outputs=x)
 
-def dehaze_generator(input_channels=3, estimation_channels=6, norm_type='batchnorm', num_or_size_splits=2):
-    """ Create a generator for dehazing.
+def dehaze_generator(input_channels=3, estimation_channels=1, norm_type='batchnorm'):
+    """ Create a generator for dehazing. The global atmospheric light is given.
 
     Args:
         input_channels: Number of input channels
@@ -207,13 +276,14 @@ def dehaze_generator(input_channels=3, estimation_channels=6, norm_type='batchno
     last = tf.keras.layers.Conv2DTranspose(
         estimation_channels, 4, strides=2,
         padding='same', kernel_initializer=initializer, 
-        activation='tanh'
+        activation='sigmoid'
     ) # (bs, 512, 512, estimation_channels)
 
     concat = tf.keras.layers.Concatenate()
 
-    inputs = tf.keras.layers.Input(shape=[None, None, input_channels])
-    x, hazy = inputs, inputs
+    hazy = tf.keras.layers.Input(shape=[None, None, input_channels])
+    atmospheric_light = tf.keras.layers.Input(shape=[None, None, input_channels])
+    x = hazy
 
     # Downsample through the model
     skips = []
@@ -231,14 +301,16 @@ def dehaze_generator(input_channels=3, estimation_channels=6, norm_type='batchno
     x = last(x)
 
     # Dehaze using equation 
-    transmission_map, atmospheric_light = tf.split(x, num_or_size_splits=num_or_size_splits, axis=-1)
-    dehazy = (hazy - atmospheric_light) / (transmission_map + 1e-5) + atmospheric_light
-    dehazy = tf.keras.activations.tanh(dehazy)
+    transmission_map = x
+    # gray = tf.image.rgb_to_grayscale(hazy)
+    # refined_transmission_map = guided_filter(gray, transmission_map, r=60, eps=0.0001)
 
-    return tf.keras.Model(inputs=inputs, outputs=dehazy)
+    dehazy = (hazy - atmospheric_light) / transmission_map + atmospheric_light
 
-def haze_generator(input_channels=3, estimation_channels=6, norm_type='batchnorm', num_or_size_splits=2):
-    """ Create a generator for hazing.
+    return tf.keras.Model(inputs=[hazy, atmospheric_light], outputs=[dehazy, transmission_map])
+
+def haze_generator(input_channels=3, estimation_channels=1, norm_type='batchnorm'):
+    """ Create a generator for hazing. Note that it only estimates transmission map because the global atmospheric light equals 1.0 (brightest pixel)
 
     Args:
         input_channels: Number of input channels
@@ -278,13 +350,14 @@ def haze_generator(input_channels=3, estimation_channels=6, norm_type='batchnorm
     last = tf.keras.layers.Conv2DTranspose(
         estimation_channels, 4, strides=2,
         padding='same', kernel_initializer=initializer, 
-        activation='tanh'
+        activation='sigmoid'
     ) # (bs, 512, 512, output_channels)
 
     concat = tf.keras.layers.Concatenate()
 
-    inputs = tf.keras.layers.Input(shape=[None, None, input_channels])
-    x, dehazy = inputs, inputs
+    dehazy = tf.keras.layers.Input(shape=[None, None, input_channels])
+    atmospheric_light = tf.keras.layers.Input(shape=[None, None, input_channels])
+    x = dehazy
 
     # Downsample through the model
     skips = []
@@ -301,11 +374,11 @@ def haze_generator(input_channels=3, estimation_channels=6, norm_type='batchnorm
 
     x = last(x)
 
-    transmission_map, atmospheric_light = tf.split(x, num_or_size_splits=num_or_size_splits, axis=-1)
-    hazy = dehazy * transmission_map + atmospheric_light * (1 - transmission_map)
-    hazy = tf.keras.activations.tanh(hazy)
+    transmission_map = x
 
-    return tf.keras.Model(inputs=inputs, outputs=hazy)
+    hazy = dehazy * transmission_map + atmospheric_light * (1 - transmission_map)
+
+    return tf.keras.Model(inputs=[dehazy, atmospheric_light], outputs=[hazy, transmission_map])
 
 def discriminator(input_channels, norm_type='batchnorm', target=True):
     """ PatchGAN discriminator model (https://arxiv.org/abs/1611.07004).
@@ -341,7 +414,7 @@ def discriminator(input_channels, norm_type='batchnorm', target=True):
     if norm_type.lower() == 'batchnorm':
         norm1 = tf.keras.layers.BatchNormalization()(conv)
     elif norm_type.lower() == 'instancenorm':
-        norm1 = tf.keras.layers.BatchNormalization()(conv)
+        norm1 = InstanceNormalization()(conv)
     
     leaky_relu = tf.keras.layers.LeakyReLU()(norm1)
 

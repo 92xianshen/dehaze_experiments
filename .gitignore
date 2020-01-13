@@ -4,6 +4,9 @@ logs/
 *.tfrecords
 src/checkpoints/
 src/visualizations/
+*.data*
+checkpiont
+*.index
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
